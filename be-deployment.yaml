@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: shivaay025/crud-eks-be:v2
+        ports:
+        - containerPort: 3000
+        env:
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: JWT_SECRET
+        - name: USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: USERNAME
+        - name: PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: PASSWORD
+        - name: DATABASE
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DATABASE
+        - name: HOST
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: HOST
+        - name: PORT
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: PORT
