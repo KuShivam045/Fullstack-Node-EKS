@@ -1,130 +1,338 @@
-# EKS Deployment Guide for Kubernetes Application
+# GitHub Actions CI/CD Pipeline for EKS Deployment
+
+This guide will help you set up a complete CI/CD pipeline using GitHub Actions to automate the deployment of your application to Amazon EKS.
 
 ## Overview
 
-This document provides a comprehensive guide for deploying a containerized application with frontend and backend services from a local Minikube environment to Amazon EKS. The deployment uses AWS Application Load Balancer (ALB) with Ingress for routing traffic to the appropriate services.
+The pipeline will handle the following tasks:
+1. Build and test your application
+2. Build Docker images for frontend and backend
+3. Push images to a container registry (AWS ECR)
+4. Deploy the application to your EKS cluster
+5. Perform validation tests
 
 ## Prerequisites
 
-- AWS CLI installed and configured with appropriate permissions
-- `eksctl` command-line utility installed
-- `kubectl` command-line utility installed
-- `helm` package manager installed
-- Docker images for frontend and backend pushed to a container registry
+- GitHub repository containing your application code
+- AWS account with EKS cluster already set up
+- AWS ECR repositories for your frontend and backend images
+- IAM user with appropriate permissions for GitHub Actions
 
-## Step 1: Create an EKS Cluster
+## Step 1: Create AWS IAM User for GitHub Actions
 
-Create a new Amazon EKS cluster using the `eksctl` tool:
+First, create an IAM user with the necessary permissions:
 
-```bash
-eksctl create cluster \
-  --name my-production-cluster \
-  --region us-east-1 \
-  --nodegroup-name standard-workers \
-  --node-type t3.medium \
-  --nodes 2 \
-  --nodes-min 1 \
-  --nodes-max 3
+1. Navigate to the AWS IAM console
+2. Create a new user with programmatic access
+3. Attach the following policies:
+   - `AmazonECR-FullAccess`
+   - `AmazonEKSClusterPolicy`
+   - Custom policy for EKS deployments (see below)
+
+Create a custom policy for EKS deployments:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribeCluster",
+        "eks:ListClusters",
+        "eks:UpdateClusterConfig"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "eks:*"
+      ],
+      "Resource": "arn:aws:eks:*:*:cluster/my-production-cluster"
+    }
+  ]
+}
 ```
 
-**Note:** This process typically takes 10-15 minutes to complete. You can customize the region, node type, and node count according to your requirements.
+Save the Access Key ID and Secret Access Key for the next step.
 
-## Step 2: Configure kubectl to Use Your New Cluster
+## Step 2: Set Up GitHub Secrets
 
-Once the cluster is created, configure `kubectl` to use the new cluster:
+Add the following secrets to your GitHub repository:
 
-```bash
-aws eks update-kubeconfig --name my-production-cluster --region us-east-1
-```
+1. Go to your GitHub repository → Settings → Secrets and variables → Actions
+2. Add the following secrets:
+   - `AWS_ACCESS_KEY_ID`: Your IAM user access key
+   - `AWS_SECRET_ACCESS_KEY`: Your IAM user secret key
+   - `ECR_REPOSITORY_FRONTEND`: The name of your frontend ECR repository
+   - `ECR_REPOSITORY_BACKEND`: The name of your backend ECR repository
+   - `AWS_REGION`: Your AWS region (e.g., us-east-1)
+   - `EKS_CLUSTER_NAME`: Your EKS cluster name
+   - `DB_PASSWORD`: Your database password for production
 
-## Step 3: Set Up IAM Permissions for the ALB Controller
+## Step 3: Create GitHub Actions Workflow Files
 
-The AWS Load Balancer Controller requires specific IAM permissions to function correctly:
+Create the following workflow files in your repository under `.github/workflows/`:
 
-```bash
-# Create an IAM policy for the ALB controller
-aws iam create-policy \
-    --policy-name AWSLoadBalancerControllerIAMPolicy \
-    --policy-document https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
+### Main CI/CD Workflow
 
-# Create a service account for the ALB controller
-eksctl create iamserviceaccount \
-  --cluster=my-production-cluster \
-  --namespace=kube-system \
-  --name=aws-load-balancer-controller \
-  --attach-policy-arn=arn:aws:iam::<your-aws-account-id>:policy/AWSLoadBalancerControllerIAMPolicy \
-  --override-existing-serviceaccounts \
-  --approve
-```
-
-Replace `<your-aws-account-id>` with your actual AWS account ID.
-
-## Step 4: Install the AWS Load Balancer Controller
-
-Install the controller using Helm:
-
-```bash
-# Add the EKS chart repo
-helm repo add eks https://aws.github.io/eks-charts
-helm repo update
-
-# Install the AWS Load Balancer Controller
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=my-production-cluster \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=aws-load-balancer-controller
-```
-
-## Step 5: Create Application Secrets
-
-Create Kubernetes secrets for your application:
-
-```bash
-kubectl create secret generic app-secrets \
-  --from-literal=DB_PASSWORD=your-prod-db-password \
-  --from-literal=REACT_APP_API_URL=/api
-```
-
-Replace `your-prod-db-password` with your actual production database password.
-
-## Step 6: Prepare Updated Configuration Files
-
-### Frontend Deployment (frontend-deployment.yaml)
-
-Keep your existing frontend deployment configuration:
+Create a file named `.github/workflows/deploy.yml`:
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: frontend
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: frontend
-  template:
-    metadata:
-      labels:
-        app: frontend
-    spec:
-      containers:
-      - name: frontend
-        image: shivaay025/frontend:v1
-        ports:
-        - containerPort: 80
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY_FRONTEND: ${{ secrets.ECR_REPOSITORY_FRONTEND }}
+  ECR_REPOSITORY_BACKEND: ${{ secrets.ECR_REPOSITORY_BACKEND }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+
+jobs:
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      # Add frontend tests
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: ./frontend
+        run: npm test
+
+      # Add backend tests
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backend tests
+        working-directory: ./backend
+        run: pytest
+
+  build-and-push:
+    name: Build and Push Docker Images
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      frontend-image: ${{ steps.build-frontend.outputs.image }}
+      backend-image: ${{ steps.build-backend.outputs.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push frontend image to Amazon ECR
+        id: build-frontend
         env:
-        - name: REACT_APP_API_URL
-          valueFrom:
-            secretKeyRef:
-              name: app-secrets
-              key: REACT_APP_API_URL
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest ./frontend
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push backend image to Amazon ECR
+        id: build-backend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest ./backend
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy to EKS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Create or update application secrets
+        run: |
+          kubectl get secret app-secrets &> /dev/null || kubectl create secret generic app-secrets \
+            --from-literal=DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
+            --from-literal=REACT_APP_API_URL='/api'
+
+      - name: Deploy frontend
+        env:
+          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend-image }}
+        run: |
+          cat << EOF > frontend-deployment.yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: frontend-deployment
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: frontend
+            template:
+              metadata:
+                labels:
+                  app: frontend
+              spec:
+                containers:
+                - name: frontend
+                  image: ${FRONTEND_IMAGE}
+                  ports:
+                  - containerPort: 80
+                  env:
+                  - name: REACT_APP_API_URL
+                    valueFrom:
+                      secretKeyRef:
+                        name: app-secrets
+                        key: REACT_APP_API_URL
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"
+          EOF
+          kubectl apply -f frontend-deployment.yaml
+          kubectl apply -f frontend-service.yaml
+
+      - name: Deploy backend
+        env:
+          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend-image }}
+        run: |
+          cat << EOF > backend-deployment.yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: backend-deployment
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: backend
+            template:
+              metadata:
+                labels:
+                  app: backend
+              spec:
+                containers:
+                - name: backend
+                  image: ${BACKEND_IMAGE}
+                  ports:
+                  - containerPort: 8080
+                  env:
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: app-secrets
+                        key: DB_PASSWORD
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "200m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "400m"
+          EOF
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yaml
+          kubectl apply -f ingress.yaml
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/frontend-deployment
+          kubectl rollout status deployment/backend-deployment
+          echo "Waiting for ingress to be ready..."
+          sleep 30
+          kubectl get ingress app-ingress
+
+  validate:
+    name: Validate Deployment
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Get ALB URL
+        id: get-alb-url
+        run: |
+          alb_url=$(kubectl get ingress app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "ALB_URL=$alb_url" >> $GITHUB_OUTPUT
+          echo "Application is available at: http://$alb_url"
+
+      - name: Health check
+        run: |
+          alb_url="${{ steps.get-alb-url.outputs.ALB_URL }}"
+          echo "Performing health check on frontend..."
+          curl -f -s -o /dev/null -w "%{http_code}" "http://$alb_url/" || exit 1
+          echo "Performing health check on backend..."
+          curl -f -s -o /dev/null -w "%{http_code}" "http://$alb_url/api/health" || exit 1
+          echo "Health checks passed!"
 ```
 
-### Frontend Service (frontend-service.yaml)
+### Frontend and Backend Deployment and Service Files
 
-Update your frontend service to use ClusterIP instead of NodePort:
+Create the following file in your repository as `frontend-service.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -134,48 +342,13 @@ metadata:
 spec:
   selector:
     app: frontend
-  type: ClusterIP
   ports:
-  - protocol: TCP
-    port: 80
+  - port: 80
     targetPort: 80
+  type: ClusterIP
 ```
 
-### Backend Deployment (backend-deployment.yaml)
-
-Keep your existing backend deployment configuration:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: backend
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: backend
-  template:
-    metadata:
-      labels:
-        app: backend
-    spec:
-      containers:
-      - name: backend
-        image: shivaay025/backend:v1
-        ports:
-        - containerPort: 3000
-        env:
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: app-secrets
-              key: DB_PASSWORD
-```
-
-### Backend Service (backend-service.yaml)
-
-Update your backend service to use ClusterIP instead of NodePort:
+Create the following file in your repository as `backend-service.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -185,16 +358,13 @@ metadata:
 spec:
   selector:
     app: backend
-  type: ClusterIP
   ports:
-  - protocol: TCP
-    port: 3000
-    targetPort: 3000
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP
 ```
 
-### Ingress Configuration (ingress.yaml)
-
-Create a new Ingress resource to route traffic to your services:
+Create the following file in your repository as `ingress.yaml`:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -202,9 +372,9 @@ kind: Ingress
 metadata:
   name: app-ingress
   annotations:
-    kubernetes.io/ingress.class: "alb"
-    alb.ingress.kubernetes.io/scheme: "internet-facing"
-    alb.ingress.kubernetes.io/target-type: "ip"
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
 spec:
   rules:
   - http:
@@ -222,112 +392,105 @@ spec:
           service:
             name: backend-service
             port:
-              number: 3000
-```
-
-## Step 7: Apply Configuration Files
-
-Apply all configuration files to your EKS cluster:
-
-```bash
-kubectl apply -f frontend-deployment.yaml
-kubectl apply -f frontend-service.yaml
-kubectl apply -f backend-deployment.yaml
-kubectl apply -f backend-service.yaml
-kubectl apply -f ingress.yaml
-```
-
-## Step 8: Verify the Deployment
-
-Verify that all components are correctly deployed:
-
-```bash
-# Check deployments
-kubectl get deployments
-
-# Check pods
-kubectl get pods
-
-# Check services
-kubectl get services
-
-# Check ingress (this might take a few minutes to provision the ALB)
-kubectl get ingress
-```
-
-## Step 9: Get the Application URL
-
-Retrieve the ALB endpoint to access your application:
-
-```bash
-kubectl get ingress app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-```
-
-Use this URL to access your application. The frontend will be available at the root path (`/`), and the backend will be accessible at the `/api` path.
-
-## Future Steps: Adding Domain and SSL
-
-When you're ready to add a custom domain and SSL:
-
-1. Register a domain name (if you don't already have one)
-2. Request an SSL certificate from AWS Certificate Manager (ACM)
-3. Create a CNAME record in your DNS settings pointing to the ALB endpoint
-4. Update the Ingress configuration with your domain and SSL certificate:
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: app-ingress
-  annotations:
-    kubernetes.io/ingress.class: "alb"
-    alb.ingress.kubernetes.io/scheme: "internet-facing"
-    alb.ingress.kubernetes.io/target-type: "ip"
-    alb.ingress.kubernetes.io/certificate-arn: <your-acm-certificate-arn>
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
-    alb.ingress.kubernetes.io/ssl-redirect: '443'
-spec:
-  rules:
-  - host: your-domain.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: frontend-service
-            port:
               number: 80
-      - path: /api
-        pathType: Prefix
-        backend:
-          service:
-            name: backend-service
-            port:
-              number: 3000
 ```
 
-## Troubleshooting
+## Step 4: Add Health Check Endpoint to Backend
 
-### Common Issues
+Make sure your backend application has a health check endpoint at `/api/health` that returns a 200 OK status. This is used by the CI/CD pipeline to verify the deployment.
 
-1. **ALB not provisioning**: Check the status of the AWS Load Balancer Controller:
-   ```bash
-   kubectl get pods -n kube-system | grep aws-load-balancer-controller
-   ```
+For example, if using Express.js:
 
-2. **Services not accessible**: Verify that your services are running and the endpoints are correct:
-   ```bash
-   kubectl get endpoints frontend-service backend-service
-   ```
+```javascript
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+```
 
-3. **IAM permissions**: Ensure your IAM permissions are correctly set up:
-   ```bash
-   kubectl describe serviceaccount aws-load-balancer-controller -n kube-system
-   ```
+Or if using Python Flask:
 
-## Resources
+```python
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"}), 200
+```
 
-- [Amazon EKS Documentation](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html)
-- [AWS Load Balancer Controller Documentation](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/)
-- [Kubernetes Ingress Documentation](https://kubernetes.io/docs/concepts/services-networking/ingress/)
+## Step 5: Add Dockerfile for Frontend and Backend
+
+Create a `Dockerfile` in your frontend directory:
+
+```dockerfile
+FROM node:18 as build
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+Create an `nginx.conf` file in your frontend directory:
+
+```
+server {
+    listen 80;
+    server_name _;
+    
+    location / {
+        root /usr/share/nginx/html;
+        index index.html index.htm;
+        try_files $uri $uri/ /index.html;
+    }
+    
+    location /api {
+        proxy_pass http://backend-service;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+Create a `Dockerfile` in your backend directory (example for Python):
+
+```dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+```
+
+## Step 6: Run the CI/CD Pipeline
+
+Push the changes to your GitHub repository:
+
+```bash
+git add .
+git commit -m "Add CI/CD pipeline"
+git push origin main
+```
+
+The pipeline will automatically run when you push to the main branch. You can also manually trigger it from the Actions tab in your GitHub repository.
+
+## GitHub Actions Workflow Explanation
+
+The CI/CD pipeline consists of four main jobs:
+
+1. **Test**: Runs tests for both frontend and backend to ensure code quality.
+2. **Build and Push**: Builds Docker images for frontend and backend, then pushes them to Amazon ECR.
+3. **Deploy**: Updates the Kubernetes manifests with the new image tags and applies them to the EKS cluster.
+4. **Validate**: Verifies that the deployment was successful by checking the health endpoints.
+
+## Additional Notes
