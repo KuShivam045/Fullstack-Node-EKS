@@ -16,7 +16,11 @@ pipeline {
                 checkout scm
             }
         }
-
+	stage('Test Docker') {
+	    steps {
+            sh 'docker info'
+            }
+	}
         stage('Build and Push Docker Images') {
             steps {
                 script {
