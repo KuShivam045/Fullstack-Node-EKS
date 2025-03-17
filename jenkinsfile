@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')  // Jenkins credential ID for DockerHub
+        DOCKERHUB_USERNAME = credentials('DOCKERHUB_USERNAME')  // Will be set from environment variables
+        DOCKERHUB_REPOSITORY = "${env.DOCKERHUB_REPOSITORY}"  // Base repository name
+        REPOSITORY_FRONTEND = "${DOCKERHUB_CREDENTIALS_USR}/crud-eks-fe"  // Frontend repository
+        REPOSITORY_BACKEND = "${DOCKERHUB_CREDENTIALS_USR}/crud-eks-be"  // Backend repository
+        AWS_REGION = 'ap-southeast-1'  // Replace with your AWS region
+        EKS_CLUSTER_NAME = 'my-cluster'  // Replace with your EKS cluster name
+        IMAGE_TAG = "${BUILD_NUMBER}-${GIT_COMMIT.substring(0,7)}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build and Push Docker Images') {
+            steps {
+                script {
+                    // Login to DockerHub using credentials
+                    sh "echo \${DOCKERHUB_CREDENTIALS_PSW} | docker login -u \${DOCKERHUB_CREDENTIALS_USR} --password-stdin"
+                    
+                    // Build and push frontend image
+                    dir('frontend') {
+                        sh "docker build -t ${REPOSITORY_FRONTEND}:${IMAGE_TAG} -t ${REPOSITORY_FRONTEND}:latest ."
+                        sh "docker push ${REPOSITORY_FRONTEND}:${IMAGE_TAG}"
+                        sh "docker push ${REPOSITORY_FRONTEND}:latest"
+                    }
+                    
+                    // Build and push backend image
+                    dir('backend') {
+                        sh "docker build -t ${REPOSITORY_BACKEND}:${IMAGE_TAG} -t ${REPOSITORY_BACKEND}:latest ."
+                        sh "docker push ${REPOSITORY_BACKEND}:${IMAGE_TAG}"
+                        sh "docker push ${REPOSITORY_BACKEND}:latest"
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to EKS') {
+            steps {
+                script {
+                    withCredentials([aws(credentialsId: 'aws-credentials', region: env.AWS_REGION)]) {
+                        // Update kubeconfig
+                        sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                        
+                        // Update image tags in deployment files
+                        sh """
+                            sed -i 's|image:.*frontend.*|image: ${REPOSITORY_FRONTEND}:${IMAGE_TAG}|g' fe-deployment.yaml
+                            sed -i 's|image:.*backend.*|image: ${REPOSITORY_BACKEND}:${IMAGE_TAG}|g' be-deployment.yaml
+                        """
+                        
+                        // Create or update application secrets
+                        sh "kubectl apply -f secrets.yaml"
+                        
+                        // Deploy frontend
+                        sh "kubectl apply -f fe-deployment.yaml"
+                        sh "kubectl apply -f fe-service.yaml"
+                        
+                        // Deploy backend                      
+                        sh "kubectl apply -f be-deployment.yaml"
+                        sh "kubectl apply -f be-service.yaml"
+                        sh "kubectl apply -f ingress.yaml"
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    withCredentials([aws(credentialsId: 'aws-credentials', region: env.AWS_REGION)]) {
+                        // Wait for deployments to complete
+                        sh "kubectl rollout status deployment/frontend-deployment"
+                        sh "kubectl rollout status deployment/backend-deployment"
+                        
+                        // Wait for ingress to be ready
+                        sh "sleep 30"  // Give some time for the ALB to be provisioned
+                        sh "kubectl get ingress app-ingress"
+                        
+                        // Get the ALB URL
+                        def albUrl = sh(script: "kubectl get ingress app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
+                        echo "Application is available at: http://${albUrl}"
+                        
+                        // Perform health checks
+                        sh """
+                            echo "Performing health check on frontend..."
+                            curl -f -s -o /dev/null -w "%{http_code}" "http://${albUrl}/"
+                            
+                            echo "Performing health check on backend..."
+                            curl -f -s -o /dev/null -w "%{http_code}" "http://${albUrl}/api/health"
+                            
+                            echo "Health checks passed!"
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Pipeline completed successfully!"
+        }
+        failure {
+            echo "Pipeline failed!"
+        }
+        always {
+            // Clean up Docker images
+            sh "docker system prune -af"
+            // Logout from DockerHub
+            sh "docker logout"
+        }
+    }
+}
