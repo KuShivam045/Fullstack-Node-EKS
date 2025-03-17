@@ -3,8 +3,6 @@ pipeline {
     
     environment {
         DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')  // Jenkins credential ID for DockerHub
-        DOCKERHUB_USERNAME = credentials('DOCKERHUB_USERNAME')  // Will be set from environment variables
-        DOCKERHUB_REPOSITORY = "${env.DOCKERHUB_REPOSITORY}"  // Base repository name
         REPOSITORY_FRONTEND = "${DOCKERHUB_CREDENTIALS_USR}/crud-eks-fe"  // Frontend repository
         REPOSITORY_BACKEND = "${DOCKERHUB_CREDENTIALS_USR}/crud-eks-be"  // Backend repository
         AWS_REGION = 'ap-southeast-1'  // Replace with your AWS region
