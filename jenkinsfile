@@ -95,7 +95,7 @@ pipeline {
                             curl -f -s -o /dev/null -w "%{http_code}" "http://${albUrl}/"
                             
                             echo "Performing health check on backend..."
-                            curl -f -s -o /dev/null -w "%{http_code}" "http://${albUrl}/api/health"
+                            curl -f -s -o /dev/null -w "%{http_code}" "http://${albUrl}/api"
                             
                             echo "Health checks passed!"
                         """
