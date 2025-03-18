@@ -78,8 +78,8 @@ pipeline {
                 script {
                     withCredentials([aws(credentialsId: 'aws-credentials', region: env.AWS_REGION)]) {
                         // Wait for deployments to complete
-                        sh "kubectl rollout status deployment/fe-deployment"
-                        sh "kubectl rollout status deployment/be-deployment"
+                        sh "kubectl rollout status deployment/frontend"
+                        sh "kubectl rollout status deployment/backend"
                         
                         // Wait for ingress to be ready
                         sh "sleep 30"  // Give some time for the ALB to be provisioned
